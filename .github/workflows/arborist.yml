@@ -1,0 +1,35 @@
+name: arborist
+
+# A scheduled report on this repository, which is also how the action itself is
+# tested: it runs the action from this checkout, built from source.
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays, 06:00 UTC
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - action.yml
+      - .github/workflows/arborist.yml
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # arborist refuses a shallow clone
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - uses: ./
+        id: arborist
+        with:
+          version: source
+          format: markdown
+          args: --skip orphans # GITHUB_TOKEN cannot read the collaborator list
+
+      - run: echo "findings=${{ steps.arborist.outputs.findings }} report=${{ steps.arborist.outputs.report-path }}"

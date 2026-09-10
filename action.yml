@@ -1,0 +1,290 @@
+name: gh-arborist
+description: Report the branches, pull requests and issues in a repository that could be pruned.
+author: danudey
+
+branding:
+  icon: scissors
+  color: green
+
+inputs:
+  command:
+    description: 'Check to run: all, closed-prs, merged, stale or orphans.'
+    default: all
+  repository:
+    description: 'Repository to scan, as [HOST/]OWNER/REPO. Set to an empty string to scan the checkout in the working directory.'
+    default: ${{ github.repository }}
+  format:
+    description: 'Report format: table, markdown, html or json.'
+    default: markdown
+  output:
+    description: 'File to write the report to. Defaults to arborist-report.<ext> under the runner temp directory. Parent directories are created.'
+    default: ''
+  args:
+    description: >-
+      Extra arguments for gh-arborist, such as "--older-than 6mo --skip orphans".
+      A single line is split on whitespace and globs are not expanded, so
+      "--base release/*" works. A multi-line value is one argument per line,
+      which is how to pass an argument containing a space.
+    default: ''
+  git:
+    description: 'Whether to read a local clone: auto, clone or never. "auto" uses the workspace checkout when it is a full clone of the repository being scanned; a shallow checkout is refused, so use fetch-depth: 0 or "clone".'
+    default: auto
+  version:
+    description: 'Version of gh-arborist to run: "latest", a release tag such as v1.2.3, or "source" to build the action''s own checkout (needs actions/setup-go). Defaults to the action''s tag when it is a full version, otherwise "latest".'
+    default: ''
+  token:
+    description: 'Token gh-arborist authenticates with. Needs push access to the repository for the orphans check.'
+    default: ${{ github.token }}
+  fail-on-findings:
+    description: 'Fail the job when the report is not empty. Publishing still happens first.'
+    default: 'false'
+  job-summary:
+    description: 'Append the report to the job summary: true, false, or "auto" for markdown reports only.'
+    default: auto
+  upload-artifact:
+    description: 'Upload the report as a workflow artifact.'
+    default: 'true'
+  artifact-name:
+    description: 'Name of the uploaded artifact.'
+    default: arborist-report
+  artifact-retention-days:
+    description: 'Days to keep the artifact. Empty means the repository default.'
+    default: ''
+  gist:
+    description: 'Publish the report to a gist. Requires gist-token.'
+    default: 'false'
+  gist-id:
+    description: 'Gist to update. Empty creates a new gist on every run.'
+    default: ''
+  gist-token:
+    description: 'Token with the "gist" scope. The built-in GITHUB_TOKEN cannot write gists, so this must be a personal access token.'
+    default: ''
+  gist-file-name:
+    description: 'Name of the file inside the gist. Defaults to the report file name.'
+    default: ''
+  gist-description:
+    description: 'Description of the gist.'
+    default: ''
+  gist-public:
+    description: 'Create the gist as public rather than secret. Only used when creating.'
+    default: 'false'
+
+outputs:
+  report-path:
+    description: 'Path of the report that was written.'
+    value: ${{ steps.run.outputs.report-path }}
+  report-format:
+    description: 'Format the report was written in.'
+    value: ${{ steps.setup.outputs.format }}
+  findings:
+    description: '"true" when the report is not empty, "false" when nothing was reported.'
+    value: ${{ steps.run.outputs.findings }}
+  gist-url:
+    description: 'URL of the gist the report was published to.'
+    value: ${{ steps.gist.outputs.gist-url }}
+  gist-id:
+    description: 'ID of the gist the report was published to.'
+    value: ${{ steps.gist.outputs.gist-id }}
+  artifact-id:
+    description: 'ID of the uploaded artifact.'
+    value: ${{ steps.artifact.outputs.artifact-id }}
+  artifact-url:
+    description: 'URL of the uploaded artifact.'
+    value: ${{ steps.artifact.outputs.artifact-url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install gh-arborist
+      id: setup
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_FORMAT: ${{ inputs.format }}
+        INPUT_OUTPUT: ${{ inputs.output }}
+        ACTION_PATH: ${{ github.action_path }}
+        ACTION_REF: ${{ github.action_ref }}
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        set -euo pipefail
+
+        case "$INPUT_FORMAT" in
+          table)          ext=txt ;;
+          markdown|md)    ext=md ;;
+          html|htm)       ext=html ;;
+          json)           ext=json ;;
+          *) echo "::error::unknown format '$INPUT_FORMAT'; choose from table, markdown, html, json" >&2; exit 1 ;;
+        esac
+        echo "format=$INPUT_FORMAT" >> "$GITHUB_OUTPUT"
+
+        output="$INPUT_OUTPUT"
+        if [ -z "$output" ]; then
+          output="$RUNNER_TEMP/arborist-report.$ext"
+        fi
+        mkdir -p "$(dirname "$output")"
+        echo "output=$output" >> "$GITHUB_OUTPUT"
+
+        version="$INPUT_VERSION"
+        if [ -z "$version" ]; then
+          if [[ "${ACTION_REF:-}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            version="$ACTION_REF"
+          else
+            version=latest
+          fi
+        fi
+
+        if [ "$version" = source ]; then
+          if ! command -v go >/dev/null 2>&1; then
+            echo "::error::version 'source' needs Go on the runner; add actions/setup-go before this step" >&2
+            exit 1
+          fi
+          bin="$RUNNER_TEMP/gh-arborist/gh-arborist"
+          mkdir -p "$(dirname "$bin")"
+          ( cd "$ACTION_PATH" && go build -o "$bin" . )
+          echo "bin=$bin" >> "$GITHUB_OUTPUT"
+          echo "Built gh-arborist from $ACTION_PATH"
+        else
+          if [ "$version" = latest ]; then
+            gh extension install danudey/gh-arborist --force
+          else
+            gh extension install danudey/gh-arborist --force --pin "$version"
+          fi
+          echo "bin=gh arborist" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Run gh-arborist
+      id: run
+      shell: bash
+      env:
+        BIN: ${{ steps.setup.outputs.bin }}
+        INPUT_COMMAND: ${{ inputs.command }}
+        INPUT_REPOSITORY: ${{ inputs.repository }}
+        INPUT_FORMAT: ${{ inputs.format }}
+        INPUT_GIT: ${{ inputs.git }}
+        INPUT_ARGS: ${{ inputs.args }}
+        OUTPUT: ${{ steps.setup.outputs.output }}
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        set -euo pipefail
+
+        # BIN is either a path to a binary or the words "gh arborist".
+        read -r -a cmd <<< "$BIN"
+        cmd+=("$INPUT_COMMAND" --format "$INPUT_FORMAT" --output "$OUTPUT" --git "$INPUT_GIT" --exit-code)
+        if [ -n "$INPUT_REPOSITORY" ]; then
+          cmd+=(--repo "$INPUT_REPOSITORY")
+        fi
+
+        # One argument per line when multi-line; otherwise split on whitespace
+        # with globbing off, so --base 'release/*' survives.
+        if [[ "$INPUT_ARGS" == *$'\n'* ]]; then
+          while IFS= read -r line; do
+            line="${line%$'\r'}"
+            line="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            [ -z "$line" ] && continue
+            cmd+=("$line")
+          done <<< "$INPUT_ARGS"
+        elif [ -n "$INPUT_ARGS" ]; then
+          set -f
+          # shellcheck disable=SC2206
+          extra=($INPUT_ARGS)
+          set +f
+          cmd+=("${extra[@]}")
+        fi
+
+        printf 'Running:'; printf ' %q' "${cmd[@]}"; printf '\n'
+
+        errlog="$RUNNER_TEMP/arborist-stderr.log"
+        set +e
+        "${cmd[@]}" 2>"$errlog"
+        status=$?
+        set -e
+        cat "$errlog" >&2
+
+        # --exit-code makes a non-empty report exit 1, and so does a real
+        # failure; only the failure prints "error:" to stderr.
+        if [ "$status" -eq 0 ]; then
+          findings=false
+        elif [ "$status" -eq 1 ] && ! grep -q '^error: ' "$errlog"; then
+          findings=true
+        else
+          exit "$status"
+        fi
+
+        echo "findings=$findings" >> "$GITHUB_OUTPUT"
+        echo "report-path=$OUTPUT" >> "$GITHUB_OUTPUT"
+        echo "Report written to $OUTPUT (findings: $findings)"
+
+    - name: Add the report to the job summary
+      if: ${{ inputs.job-summary == 'true' || (inputs.job-summary == 'auto' && (inputs.format == 'markdown' || inputs.format == 'md')) }}
+      shell: bash
+      env:
+        REPORT: ${{ steps.run.outputs.report-path }}
+      run: |
+        set -euo pipefail
+        # The job summary is capped at 1 MiB; leave room for the notice.
+        limit=1000000
+        size=$(wc -c <"$REPORT")
+        if [ "$size" -gt "$limit" ]; then
+          head -c "$limit" "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+          printf '\n\n_Report truncated at %s bytes; the full report is in the artifact._\n' "$limit" >> "$GITHUB_STEP_SUMMARY"
+        else
+          cat "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+    - name: Upload the report
+      id: artifact
+      if: ${{ inputs.upload-artifact == 'true' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ steps.run.outputs.report-path }}
+        retention-days: ${{ inputs.artifact-retention-days }}
+        if-no-files-found: error
+
+    - name: Publish the report to a gist
+      id: gist
+      if: ${{ inputs.gist == 'true' }}
+      shell: bash
+      env:
+        REPORT: ${{ steps.run.outputs.report-path }}
+        GIST_ID: ${{ inputs.gist-id }}
+        GIST_FILE_NAME: ${{ inputs.gist-file-name }}
+        GIST_DESCRIPTION: ${{ inputs.gist-description }}
+        GIST_PUBLIC: ${{ inputs.gist-public }}
+        GH_TOKEN: ${{ inputs.gist-token }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "${GH_TOKEN:-}" ]; then
+          echo "::error::gist: true needs gist-token, a personal access token with the 'gist' scope; the built-in GITHUB_TOKEN cannot write gists" >&2
+          exit 1
+        fi
+
+        name="${GIST_FILE_NAME:-$(basename "$REPORT")}"
+        description="${GIST_DESCRIPTION:-gh-arborist report for ${GITHUB_REPOSITORY} — ${GITHUB_RUN_ID}}"
+
+        if [ -n "$GIST_ID" ]; then
+          body=$(jq -n --arg name "$name" --rawfile content "$REPORT" --arg desc "$description" \
+            '{description: $desc, files: {($name): {content: $content}}}')
+          url=$(printf '%s' "$body" | gh api -X PATCH "gists/$GIST_ID" --input - -q .html_url)
+          id="$GIST_ID"
+        else
+          public=false
+          [ "$GIST_PUBLIC" = "true" ] && public=true
+          body=$(jq -n --arg name "$name" --rawfile content "$REPORT" --arg desc "$description" --argjson public "$public" \
+            '{description: $desc, public: $public, files: {($name): {content: $content}}}')
+          created=$(printf '%s' "$body" | gh api -X POST gists --input -)
+          url=$(printf '%s' "$created" | jq -r .html_url)
+          id=$(printf '%s' "$created" | jq -r .id)
+        fi
+
+        echo "gist-url=$url" >> "$GITHUB_OUTPUT"
+        echo "gist-id=$id" >> "$GITHUB_OUTPUT"
+        echo "Published to $url"
+
+    - name: Fail on findings
+      if: ${{ inputs.fail-on-findings == 'true' && steps.run.outputs.findings == 'true' }}
+      shell: bash
+      run: |
+        echo "::error::gh-arborist reported findings; see the report" >&2
+        exit 1

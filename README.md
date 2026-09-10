@@ -13,6 +13,9 @@ version only ever produces a report.** Nothing is deleted, closed or reassigned.
 gh extension install danudey/gh-arborist
 ```
 
+To run it on a schedule instead, see [On a schedule, as a GitHub
+Action](#on-a-schedule-as-a-github-action).
+
 ## Use
 
 ```sh
@@ -352,6 +355,224 @@ survive `cache clear`, since a fetch brings one up to date.
 
 Together, on a 164-branch private repository: a first scan takes about ten
 seconds, and the next one about one and a half.
+
+## On a schedule, as a GitHub Action
+
+The same scan runs as an action, so a repository can report on itself every week
+without anybody remembering to ask. The report is uploaded as a workflow
+artifact by default, and can go to a gist, a Pages site, a bucket, or anywhere
+else an existing action can put a file.
+
+```yaml
+name: arborist
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays, 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: danudey/gh-arborist@v1
+        with:
+          format: markdown
+```
+
+That writes a Markdown report, uploads it as the `arborist-report` artifact, and
+puts it in the job summary, so the run's own page is the report. Nothing is
+deleted, here as everywhere.
+
+### Inputs
+
+| Input | Default | Effect |
+| --- | --- | --- |
+| `command` | `all` | Which check to run: `all`, `closed-prs`, `merged`, `stale`, `orphans` |
+| `repository` | this repository | Repository to scan. Empty means the checkout in the working directory |
+| `format` | `markdown` | `table`, `markdown`, `html` or `json` |
+| `output` | temp dir | Where to write the report. Parent directories are created |
+| `args` | — | Anything else to pass to `gh arborist`, such as `--older-than 6mo --skip orphans` |
+| `git` | `auto` | `auto`, `clone` or `never`, as `--git` |
+| `version` | the action's tag | `latest`, a release tag, or `source` to build the action's own checkout |
+| `token` | `github.token` | Token arborist authenticates with |
+| `fail-on-findings` | `false` | Fail the job when the report is not empty. Publishing still happens first |
+| `job-summary` | `auto` | Append the report to the job summary. `auto` means Markdown reports only |
+| `upload-artifact` | `true` | Upload the report as a workflow artifact |
+| `artifact-name` | `arborist-report` | Name of that artifact |
+| `artifact-retention-days` | repository default | How long to keep it |
+| `gist` | `false` | Publish the report to a gist |
+| `gist-id` | — | Gist to update. Empty creates a new one on every run |
+| `gist-token` | — | Personal access token with the `gist` scope |
+| `gist-file-name` | the report's file name | Name of the file inside the gist |
+| `gist-description`, `gist-public` | — | Description, and whether a newly created gist is public |
+
+A single-line `args` is split on whitespace with globbing off, so
+`--base release/*` reaches arborist intact. To pass an argument containing a
+space, give one argument per line:
+
+```yaml
+args: |
+  --older-than
+  18mo
+  --exclude
+  release/*
+```
+
+### Outputs
+
+| Output | Value |
+| --- | --- |
+| `report-path` | Path of the report that was written |
+| `report-format` | The format it was written in |
+| `findings` | `true` when the report is not empty, `false` when nothing was reported |
+| `gist-url`, `gist-id` | The gist it was published to |
+| `artifact-id`, `artifact-url` | The artifact it was uploaded to |
+
+### Tokens and permissions
+
+The default `GITHUB_TOKEN` is enough for every check but `orphans`, which reads
+the collaborator list and so needs push access. Either leave it out:
+
+```yaml
+with:
+  args: --skip orphans
+```
+
+or give the action a personal access token with `repo` scope:
+
+```yaml
+with:
+  token: ${{ secrets.ARBORIST_TOKEN }}
+```
+
+Gists are the other exception: `GITHUB_TOKEN` cannot write them at all, whatever
+the workflow's `permissions`, so `gist: true` needs a personal access token with
+the `gist` scope.
+
+### Keeping a scheduled run cheap
+
+Two things cut the API traffic, and both are worth setting up for a repository
+big enough to notice. Check out the full history and arborist reads branches,
+dates and merge status from the clone instead of the API:
+
+```yaml
+- uses: actions/checkout@v6
+  with:
+    fetch-depth: 0 # a shallow clone is refused, and the run falls back to the API
+```
+
+Without a checkout, `git: clone` makes a blobless clone of its own. Either way,
+carry the answer cache between runs:
+
+```yaml
+- uses: actions/cache@v4
+  with:
+    path: ~/.cache/gh-arborist
+    key: arborist-${{ github.run_id }}
+    restore-keys: arborist-
+```
+
+### Publishing the report
+
+#### To a gist
+
+One gist, rewritten every run, so the URL stays the same and its revision list
+becomes the history of the repository's pruning:
+
+```yaml
+- uses: danudey/gh-arborist@v1
+  with:
+    format: markdown
+    gist: true
+    gist-id: 0123456789abcdef0123456789abcdef # omit to create a new gist each run
+    gist-token: ${{ secrets.GIST_TOKEN }}
+    gist-description: What could be pruned in ${{ github.repository }}
+```
+
+Leave `gist-id` out on the first run, read the `gist-id` output from the log,
+then set it.
+
+#### To GitHub Pages
+
+`--format html` writes a self-contained page, which is exactly what Pages wants:
+
+```yaml
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.pages.outputs.page_url }}
+    steps:
+      - uses: danudey/gh-arborist@v1
+        with:
+          format: html
+          output: site/index.html
+          upload-artifact: false
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - uses: actions/deploy-pages@v4
+        id: pages
+```
+
+Turn Pages on for the repository first, with **Settings → Pages → Source →
+GitHub Actions**. On a private repository the site is private too.
+
+#### To an S3 bucket
+
+```yaml
+permissions:
+  contents: read
+  id-token: write # for the OIDC role assumption below
+
+steps:
+  - uses: danudey/gh-arborist@v1
+    id: arborist
+    with:
+      format: html
+      output: report/index.html
+  - uses: aws-actions/configure-aws-credentials@v4
+    with:
+      role-to-assume: arn:aws:iam::123456789012:role/gh-arborist
+      aws-region: us-east-1
+  - run: aws s3 cp report/index.html "s3://my-bucket/arborist/${GITHUB_REPOSITORY}/index.html"
+```
+
+Keeping the dated runs as well as the current one is one more `cp` to
+`.../$(date +%F).html`.
+
+#### To an issue
+
+```yaml
+permissions:
+  contents: read
+  issues: write
+
+steps:
+  - uses: danudey/gh-arborist@v1
+    id: arborist
+    with:
+      format: markdown
+  - uses: peter-evans/create-issue-from-file@v5
+    if: steps.arborist.outputs.findings == 'true'
+    with:
+      title: Branches that could be pruned
+      content-filepath: ${{ steps.arborist.outputs.report-path }}
+      labels: housekeeping
+```
+
+The Markdown report uses `<details>` blocks, which GitHub renders, so it reads
+the same in an issue as it does anywhere else.
 
 ## Limitations
 

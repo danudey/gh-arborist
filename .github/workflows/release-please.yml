@@ -1,0 +1,45 @@
+name: release-please
+
+# Keeps a release pull request open against main, holding the next version and
+# the changelog entries earned by the conventional commits merged since the
+# last release. Merging that pull request is what cuts the release: the action
+# then tags it and creates the GitHub release.
+#
+# The commit subjects on main are what it reads, so this only works if pull
+# requests are squash merged with the pull request title as the commit
+# subject. That is a repository setting, not something a workflow can enforce:
+#   Settings -> General -> Pull Requests
+#     - Allow squash merging
+#     - Default commit message: "Pull request title"
+# pr-title.yml checks those titles on the way in.
+#
+# Go note: for a v2 or later major version, Go requires the module path itself
+# to gain a /v2 suffix. release-please will tag v2.0.0 but will not edit
+# go.mod, so that one is a manual step.
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      # Tagging the release and pushing changelog commits.
+      contents: write
+      # Opening and updating the release pull request.
+      pull-requests: write
+    steps:
+      - name: Open or update the release pull request
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
