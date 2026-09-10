@@ -22,8 +22,6 @@ func scratch(t *testing.T) string {
 	}
 	dir := t.TempDir()
 	run(t, dir, "init", "--quiet", "--initial-branch=main")
-	run(t, dir, "config", "user.name", "Ada")
-	run(t, dir, "config", "user.email", "ada@example.com")
 	run(t, dir, "remote", "add", "origin", "https://github.com/owner/repo.git")
 	return dir
 }
@@ -32,7 +30,14 @@ func run(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
-	cmd.Env = append(cmd.Environ(), "GIT_AUTHOR_DATE=2020-03-04T05:06:07Z", "GIT_COMMITTER_DATE=2020-03-04T05:06:07Z")
+	// The identity comes from the environment rather than repository config,
+	// because a repository made by "git clone" here gets neither ours nor the
+	// machine's: CI runners have no global identity to fall back on.
+	cmd.Env = append(cmd.Environ(),
+		"GIT_AUTHOR_DATE=2020-03-04T05:06:07Z", "GIT_COMMITTER_DATE=2020-03-04T05:06:07Z",
+		"GIT_AUTHOR_NAME=Ada", "GIT_AUTHOR_EMAIL=ada@example.com",
+		"GIT_COMMITTER_NAME=Ada", "GIT_COMMITTER_EMAIL=ada@example.com",
+	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
