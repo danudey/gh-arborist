@@ -167,7 +167,7 @@ func newCacheCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), dir)
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), dir)
 			return nil
 		},
 	})
@@ -186,7 +186,7 @@ func newCacheCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Cleared %s\n", path)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Cleared %s\n", path)
 			return nil
 		},
 	})
@@ -446,7 +446,7 @@ func execute(cmd *cobra.Command, g *globals, f *checkFlags, ids []string) error 
 	var progress func(format string, args ...any)
 	if g.verbose {
 		progress = func(format string, args ...any) {
-			fmt.Fprintf(cmd.ErrOrStderr(), "· "+format+"\n", args...)
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "· "+format+"\n", args...)
 		}
 		client.Progress = progress
 	}
@@ -497,7 +497,7 @@ func execute(cmd *cobra.Command, g *globals, f *checkFlags, ids []string) error 
 			return err
 		}
 		if !o.stdout() {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Wrote %s report for %s to %s\n", o.format, res.Repository, o.path)
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Wrote %s report for %s to %s\n", o.format, res.Repository, o.path)
 		}
 		summarised = summarised || (o.format == report.FormatTable && isTTY)
 	}
@@ -526,7 +526,7 @@ func openSource(ctx context.Context, repo repository.Repository, client *gh.Clie
 		// than a reason to stop.
 		c, err := cache.Open(repo.Host, repo.Owner, repo.Name)
 		if err != nil {
-			fmt.Fprintf(errOut, "warning: running without a cache: %v\n", err)
+			_, _ = fmt.Fprintf(errOut, "warning: running without a cache: %v\n", err)
 		}
 		store = c
 	}
@@ -555,7 +555,7 @@ func openSource(ctx context.Context, repo repository.Repository, client *gh.Clie
 	})
 	return src, func(errOut io.Writer) {
 		if err := src.Save(); err != nil {
-			fmt.Fprintf(errOut, "warning: %v\n", err)
+			_, _ = fmt.Fprintf(errOut, "warning: %v\n", err)
 		}
 	}, nil
 }
@@ -598,7 +598,7 @@ func writeReport(res *checks.Result, o output, opts report.Options, stdout io.Wr
 	if err != nil {
 		return err
 	}
-	defer closeOut()
+	defer func() { _ = closeOut() }()
 	opts.Out = out
 	if err := report.Render(res, opts); err != nil {
 		return err
@@ -637,7 +637,7 @@ func openOutput(path string, fallback io.Writer) (io.Writer, func() error, error
 		}
 		closed = true
 		if err := buf.Flush(); err != nil {
-			f.Close()
+			_ = f.Close()
 			return err
 		}
 		return f.Close()

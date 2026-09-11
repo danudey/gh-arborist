@@ -20,8 +20,8 @@ func renderTable(res *result, opts Options) error {
 	links := newLinker(opts.Hyperlinks, opts.IsTTY, opts.Env)
 
 	if opts.IsTTY {
-		fmt.Fprintf(opts.Out, "%s\n", c.bold(links.wrap(res.RepositoryURL, res.Repository)))
-		fmt.Fprintf(opts.Out, "%s · %s · scanned %s\n\n",
+		_, _ = fmt.Fprintf(opts.Out, "%s\n", c.bold(links.wrap(res.RepositoryURL, res.Repository)))
+		_, _ = fmt.Fprintf(opts.Out, "%s · %s · scanned %s\n\n",
 			strings.Join(res.ChecksRun, ", "),
 			describeScanned(res.Scanned),
 			res.ScannedAt.UTC().Format("2006-01-02 15:04 MST"))
@@ -29,7 +29,7 @@ func renderTable(res *result, opts Options) error {
 
 	if len(res.Findings) == 0 {
 		if opts.IsTTY {
-			fmt.Fprintf(opts.Out, "%s Nothing to prune.\n", c.green("✓"))
+			_, _ = fmt.Fprintf(opts.Out, "%s Nothing to prune.\n", c.green("✓"))
 		}
 		writeNotes(res, opts, c)
 		return nil
@@ -51,22 +51,22 @@ func renderTable(res *result, opts Options) error {
 			continue
 		}
 
-		fmt.Fprintf(opts.Out, "%s\n", c.bold(strings.ToUpper(plural(len(findings), section.singular, section.plural))))
+		_, _ = fmt.Fprintf(opts.Out, "%s\n", c.bold(strings.ToUpper(plural(len(findings), section.singular, section.plural))))
 
 		// A table per indicator. An item that matched several appears under
 		// each of them.
 		for _, group := range res.GroupsOfKind(section.kind) {
-			fmt.Fprintf(opts.Out, "%s\n", c.bold(fmt.Sprintf("  %s (%d)", group.Title, len(group.Findings))))
+			_, _ = fmt.Fprintf(opts.Out, "%s\n", c.bold(fmt.Sprintf("  %s (%d)", group.Title, len(group.Findings))))
 			if err := writeRows(res, opts, section.header, group.Findings, c, links); err != nil {
 				return err
 			}
-			fmt.Fprintln(opts.Out)
+			_, _ = fmt.Fprintln(opts.Out)
 		}
 	}
 
 	if opts.IsTTY {
-		fmt.Fprintf(opts.Out, "%s\n", summary(res, c))
-		fmt.Fprintf(opts.Out, "%s\n", c.gray(disclaimer))
+		_, _ = fmt.Fprintf(opts.Out, "%s\n", summary(res, c))
+		_, _ = fmt.Fprintf(opts.Out, "%s\n", c.gray(disclaimer))
 	}
 	writeNotes(res, opts, c)
 	return nil
@@ -144,8 +144,8 @@ func writeNotes(res *result, opts Options, c palette) {
 	if len(res.Notes) == 0 || opts.ErrOut == nil {
 		return
 	}
-	fmt.Fprintln(opts.ErrOut)
+	_, _ = fmt.Fprintln(opts.ErrOut)
 	for _, note := range res.Notes {
-		fmt.Fprintf(opts.ErrOut, "%s %s\n", c.yellow("note:"), note)
+		_, _ = fmt.Fprintf(opts.ErrOut, "%s %s\n", c.yellow("note:"), note)
 	}
 }
