@@ -126,6 +126,29 @@ func TestRenderEmpty(t *testing.T) {
 	}
 }
 
+// The summary is what a run says for itself when the report went to a file,
+// so it has to carry both the tally and the disclaimer.
+func TestWriteSummary(t *testing.T) {
+	var out bytes.Buffer
+	if err := WriteSummary(&out, sampleResult(), false); err != nil {
+		t.Fatalf("WriteSummary: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{"2 items flagged", "1 to delete", "1 to reassign", disclaimer} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the summary is missing %q:\n%s", want, got)
+		}
+	}
+
+	out.Reset()
+	if err := WriteSummary(&out, checks.NewResult("acme/widgets", now), false); err != nil {
+		t.Fatalf("WriteSummary: %v", err)
+	}
+	if !strings.Contains(out.String(), "Nothing to prune") {
+		t.Errorf("an empty result should say so, got %q", out.String())
+	}
+}
+
 func TestRenderJSON(t *testing.T) {
 	var out bytes.Buffer
 	if err := Render(sampleResult(), Options{Out: &out, Format: FormatJSON}); err != nil {

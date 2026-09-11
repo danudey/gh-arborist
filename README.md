@@ -22,8 +22,8 @@ Action](#on-a-schedule-as-a-github-action).
 gh arborist all                          # every check, in the current repository
 gh arborist all -R owner/repo            # somewhere else
 gh arborist stale --older-than 2y        # one check at a time
-gh arborist all --json | jq .            # machine-readable
-gh arborist all --format html -o out.html  # a page you can browse and share
+gh arborist all --output-json - | jq .   # machine-readable
+gh arborist all --output-html out.html   # a page you can browse and share
 gh arborist all -R owner/repo --git clone  # read the history locally, not over the API
 ```
 
@@ -152,9 +152,10 @@ Global:
 | Flag | Effect |
 | --- | --- |
 | `-R`, `--repo [HOST/]OWNER/REPO` | Repository to scan (default: the current directory's) |
-| `--format table\|markdown\|html\|json` | Output shape (default `table`) |
-| `--json` | Shorthand for `--format json` |
-| `-o`, `--output FILE` | Write the report to a file instead of standard output |
+| `--output-table FILE` | Write the terminal report to a file, or to standard output with `-` |
+| `--output-md FILE` | Write the Markdown report to a file, or to standard output with `-` |
+| `--output-html FILE` | Write the HTML report to a file, or to standard output with `-` |
+| `--output-json FILE` | Write the JSON report to a file, or to standard output with `-` |
 | `--hyperlinks auto\|always\|never` | Clickable links in terminal output (default `auto`) |
 | `--exclude GLOB` | Branch names no check may flag; repeatable (merge bases are added to this automatically) |
 | `--include-protected` | Also report branches that protection rules forbid deleting |
@@ -175,6 +176,40 @@ Per check: `--older-than` (stale); `--base`, `--all-bases` (merged);
 `--skip-forks`, `--ignore-user`, `--limit` (orphans); `--skip` (all).
 
 ## Output
+
+### Where the report goes
+
+Run a check with no output flag and you get the terminal report on standard
+output, followed by a summary of what was found.
+
+Each format has its own flag, and each takes a file to write that format to.
+Ask for as many as you like in one run: the scan happens once and every report
+is written from the same result.
+
+```sh
+# one page
+gh arborist all --output-html report.html
+
+# two files, one scan
+gh arborist all --output-md report.md --output-json report.json
+
+# JSON on standard output
+gh arborist all --output-json - | jq .
+
+# a page to keep, and the tables on screen while it is written
+gh arborist all --output-html report.html --output-table -
+```
+
+Pass `-` instead of a file name to write that format to standard output. Two
+formats cannot both go there, and neither can two go to the same file; either
+is refused rather than written as nonsense.
+
+Once any output flag is given, standard output carries the summary — the tally
+of what was flagged and by which suggested action — and nothing else, so
+`gh arborist all --output-html report.html` says in one line what the page
+contains. Each file written is announced on stderr. When a report is itself
+going to standard output the summary moves to stderr, so that a document or a
+JSON stream is never appended to.
 
 ### Terminal
 
@@ -218,11 +253,11 @@ gh arborist all | awk -F'\t' '$4 == "delete" { print $1 }'
 # shilpa      6 years ago    ...    delete     ...   merged-into-base,older-than-threshold
 ```
 
-Notes and warnings go to stderr, so they never pollute a pipe.
+Notes, warnings and the summary go to stderr, so they never pollute a pipe.
 
 ### HTML and Markdown
 
-`--format html` writes a self-contained page and `--format markdown` writes a
+`--output-html` writes a self-contained page and `--output-md` writes a
 document. Both keep the scannable tables, one per indicator under each kind, and
 add what the terminal has no room for: a link to every resource, and an
 expandable block per item holding the full reasons and the facts behind them.
@@ -254,7 +289,7 @@ That costs one extra API request per fifty branches.
 
 ### JSON
 
-`--json` gives the whole report: every finding, every reason, which check
+`--output-json` gives the whole report: every finding, every reason, which check
 produced it, which indicator (`category`) it files the item under, each item's
 details, and the notes about how to read the results. Each item appears once,
 with all of its reasons, so group by `reasons[].category` to rebuild the
@@ -359,7 +394,7 @@ seconds, and the next one about one and a half.
 ## On a schedule, as a GitHub Action
 
 The same scan runs as an action, so a repository can report on itself every week
-without anybody remembering to ask. The report is uploaded as a workflow
+without anybody remembering to ask. The reports are uploaded as a workflow
 artifact by default, and can go to a gist, a Pages site, a bucket, or anywhere
 else an existing action can put a file.
 
@@ -378,13 +413,43 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: danudey/gh-arborist@v1
-        with:
-          format: markdown
 ```
 
 That writes a Markdown report, uploads it as the `arborist-report` artifact, and
 puts it in the job summary, so the run's own page is the report. Nothing is
 deleted, here as everywhere.
+
+### More than one report
+
+One scan can write every format it knows. List them in `formats`, and each one
+is written to `arborist-report.<ext>` in the runner's temp directory:
+
+```yaml
+with:
+  formats: markdown html json
+```
+
+All three go into the one artifact, and the Markdown one goes to the job
+summary, followed by a link to the artifact holding the lot — which is how to
+get at an HTML report without publishing it anywhere. Give a format a path of its own with `output-table`, `output-md`,
+`output-html` or `output-json`, which also asks for that format:
+
+```yaml
+with:
+  formats: markdown              # to the temp directory, for the artifact
+  output-html: site/index.html   # exactly where Pages wants it
+```
+
+Or move the default names somewhere else with `output-dir`:
+
+```yaml
+with:
+  formats: markdown html
+  output-dir: reports            # reports/arborist-report.md and .html
+```
+
+Each format is written once, however many times it is named. Every report comes
+out of a single scan, so a second format costs no extra API requests.
 
 ### Inputs
 
@@ -392,21 +457,22 @@ deleted, here as everywhere.
 | --- | --- | --- |
 | `command` | `all` | Which check to run: `all`, `closed-prs`, `merged`, `stale`, `orphans` |
 | `repository` | this repository | Repository to scan. Empty means the checkout in the working directory |
-| `format` | `markdown` | `table`, `markdown`, `html` or `json` |
-| `output` | temp dir | Where to write the report. Parent directories are created |
+| `formats` | `markdown` | Formats to write, separated by spaces, commas or newlines: `table`, `markdown`, `html`, `json` |
+| `output-dir` | temp dir | Directory for the reports `formats` names, each `arborist-report.<ext>` |
+| `output-table`, `output-md`, `output-html`, `output-json` | — | Path for one format, which also asks for it. Parent directories are created |
 | `args` | — | Anything else to pass to `gh arborist`, such as `--older-than 6mo --skip orphans` |
 | `git` | `auto` | `auto`, `clone` or `never`, as `--git` |
 | `version` | the action's tag | `latest`, a release tag, or `source` to build the action's own checkout |
 | `token` | `github.token` | Token arborist authenticates with |
 | `fail-on-findings` | `false` | Fail the job when the report is not empty. Publishing still happens first |
-| `job-summary` | `auto` | Append the report to the job summary. `auto` means Markdown reports only |
-| `upload-artifact` | `true` | Upload the report as a workflow artifact |
-| `artifact-name` | `arborist-report` | Name of that artifact |
+| `job-summary` | `auto` | Append a report to the job summary. `auto` means only when a Markdown report was written; `true` falls back to the table report. Anything but `false` also links the artifact |
+| `upload-artifact` | `true` | Upload the reports as a workflow artifact |
+| `artifact-name` | `arborist-report` | Name of that artifact, which holds every report |
 | `artifact-retention-days` | repository default | How long to keep it |
-| `gist` | `false` | Publish the report to a gist |
+| `gist` | `false` | Publish the reports to a gist, one file each |
 | `gist-id` | — | Gist to update. Empty creates a new one on every run |
 | `gist-token` | — | Personal access token with the `gist` scope |
-| `gist-file-name` | the report's file name | Name of the file inside the gist |
+| `gist-file-name` | the report's file name | Name of the file inside the gist. Only valid when a single report is written |
 | `gist-description`, `gist-public` | — | Description, and whether a newly created gist is public |
 
 A single-line `args` is split on whitespace with globbing off, so
@@ -425,8 +491,11 @@ args: |
 
 | Output | Value |
 | --- | --- |
-| `report-path` | Path of the report that was written |
-| `report-format` | The format it was written in |
+| `report-path` | Path of the first report written, in the order `table`, `markdown`, `html`, `json`. What to use when there is only one |
+| `report-format` | The format `report-path` points at |
+| `report-paths` | Every report written, one path per line |
+| `report-formats` | The formats written, separated by spaces |
+| `report-table-path`, `report-md-path`, `report-html-path`, `report-json-path` | Path of that one report, or empty when it was not written |
 | `findings` | `true` when the report is not empty, `false` when nothing was reported |
 | `gist-url`, `gist-id` | The gist it was published to |
 | `artifact-id`, `artifact-url` | The artifact it was uploaded to |
@@ -485,7 +554,7 @@ becomes the history of the repository's pruning:
 ```yaml
 - uses: danudey/gh-arborist@v1
   with:
-    format: markdown
+    formats: markdown
     gist: true
     gist-id: 0123456789abcdef0123456789abcdef # omit to create a new gist each run
     gist-token: ${{ secrets.GIST_TOKEN }}
@@ -495,9 +564,13 @@ becomes the history of the repository's pruning:
 Leave `gist-id` out on the first run, read the `gist-id` output from the log,
 then set it.
 
+Every report written becomes a file in the one gist, named after itself, so
+`formats: markdown html` gives a gist holding `arborist-report.md` and
+`arborist-report.html`.
+
 #### To GitHub Pages
 
-`--format html` writes a self-contained page, which is exactly what Pages wants:
+`--output-html` writes a self-contained page, which is exactly what Pages wants:
 
 ```yaml
 permissions:
@@ -514,8 +587,7 @@ jobs:
     steps:
       - uses: danudey/gh-arborist@v1
         with:
-          format: html
-          output: site/index.html
+          output-html: site/index.html
           upload-artifact: false
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
@@ -539,8 +611,7 @@ steps:
   - uses: danudey/gh-arborist@v1
     id: arborist
     with:
-      format: html
-      output: report/index.html
+      output-html: report/index.html
   - uses: aws-actions/configure-aws-credentials@v4
     with:
       role-to-assume: arn:aws:iam::123456789012:role/gh-arborist
@@ -562,12 +633,12 @@ steps:
   - uses: danudey/gh-arborist@v1
     id: arborist
     with:
-      format: markdown
+      formats: markdown
   - uses: peter-evans/create-issue-from-file@v5
     if: steps.arborist.outputs.findings == 'true'
     with:
       title: Branches that could be pruned
-      content-filepath: ${{ steps.arborist.outputs.report-path }}
+      content-filepath: ${{ steps.arborist.outputs.report-md-path }}
       labels: housekeeping
 ```
 

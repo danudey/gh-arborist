@@ -31,26 +31,6 @@ const (
 	FormatHTML Format = "html"
 )
 
-// Formats lists the accepted format names, for help text and errors.
-func Formats() []string {
-	return []string{string(FormatTable), string(FormatMarkdown), string(FormatHTML), string(FormatJSON)}
-}
-
-// ParseFormat resolves a format name, accepting the usual abbreviations.
-func ParseFormat(s string) (Format, error) {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "", "table", "text", "terminal", "tty":
-		return FormatTable, nil
-	case "json":
-		return FormatJSON, nil
-	case "markdown", "md":
-		return FormatMarkdown, nil
-	case "html", "htm":
-		return FormatHTML, nil
-	}
-	return "", fmt.Errorf("unknown format %q; choose from %s", s, strings.Join(Formats(), ", "))
-}
-
 // Options controls how a result is rendered.
 type Options struct {
 	// Out receives the report itself.

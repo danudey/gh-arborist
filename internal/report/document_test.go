@@ -241,27 +241,6 @@ func TestHTMLEscapesFindingText(t *testing.T) {
 	}
 }
 
-func TestParseFormat(t *testing.T) {
-	for in, want := range map[string]Format{
-		"": FormatTable, "table": FormatTable, "text": FormatTable,
-		"json": FormatJSON, "JSON": FormatJSON,
-		"markdown": FormatMarkdown, "md": FormatMarkdown,
-		"html": FormatHTML, "htm": FormatHTML, " HTML ": FormatHTML,
-	} {
-		got, err := ParseFormat(in)
-		if err != nil {
-			t.Errorf("ParseFormat(%q): %v", in, err)
-		} else if got != want {
-			t.Errorf("ParseFormat(%q) = %q, want %q", in, got, want)
-		}
-	}
-	if _, err := ParseFormat("pdf"); err == nil {
-		t.Error("an unknown format should fail")
-	} else if !strings.Contains(err.Error(), "markdown") {
-		t.Errorf("the error should list the valid formats, got %q", err)
-	}
-}
-
 func TestUniqueSlug(t *testing.T) {
 	used := map[string]bool{}
 	tests := []struct{ in, want string }{

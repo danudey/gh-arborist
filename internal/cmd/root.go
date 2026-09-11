@@ -29,10 +29,10 @@ var ErrFindings = errors.New("findings reported")
 
 // globals are the flags every subcommand shares.
 type globals struct {
-	repo             string
-	format           string
-	jsonOut          bool
-	output           string
+	repo string
+	// outputs holds the destination given for each format, keyed by format so
+	// that the flags and the reports they ask for stay in step.
+	outputs          map[report.Format]*string
 	hyperlinks       string
 	excludes         []string
 	includeProtected bool
@@ -45,6 +45,31 @@ type globals struct {
 	noFetch          bool
 	noCache          bool
 }
+
+// outputFormats is the flag that asks for each report format, in the order
+// the reports are written when more than one is asked for.
+var outputFormats = []struct {
+	format report.Format
+	flag   string
+	help   string
+}{
+	{report.FormatTable, "output-table", "Write the terminal report to this file, or to standard output with -"},
+	{report.FormatMarkdown, "output-md", "Write the Markdown report to this file, or to standard output with -"},
+	{report.FormatHTML, "output-html", "Write the HTML report to this file, or to standard output with -"},
+	{report.FormatJSON, "output-json", "Write the JSON report to this file, or to standard output with -"},
+}
+
+// output is one report and where it is going. A path of "-" is standard
+// output.
+type output struct {
+	format report.Format
+	flag   string
+	path   string
+}
+
+// stdout reports whether this report goes to standard output rather than a
+// file.
+func (o output) stdout() bool { return o.path == "-" }
 
 // checkFlags are the per-check flags, held together so that "all" can offer
 // the union of them.
@@ -77,6 +102,12 @@ func New(version string) *cobra.Command {
 
 			Each check is available on its own, or run them together with
 			"gh arborist all".
+
+			By default the terminal report is printed, followed by a summary of
+			what was found. Ask for a file with one or more of --output-table,
+			--output-md, --output-html and --output-json, and only the summary is
+			printed. Any of them takes "-" to write that format to standard
+			output.
 		`),
 		Version:       version,
 		SilenceUsage:  true,
@@ -85,9 +116,12 @@ func New(version string) *cobra.Command {
 
 	pf := root.PersistentFlags()
 	pf.StringVarP(&g.repo, "repo", "R", "", "Repository to scan, as [HOST/]OWNER/REPO (default: the current directory's repository)")
-	pf.StringVar(&g.format, "format", "table", "Report format: "+strings.Join(report.Formats(), ", "))
-	pf.BoolVar(&g.jsonOut, "json", false, "Shorthand for --format json")
-	pf.StringVarP(&g.output, "output", "o", "", "Write the report to a file instead of standard output")
+	g.outputs = make(map[report.Format]*string, len(outputFormats))
+	for _, o := range outputFormats {
+		dest := new(string)
+		g.outputs[o.format] = dest
+		pf.StringVar(dest, o.flag, "", o.help)
+	}
 	pf.StringVar(&g.hyperlinks, "hyperlinks", "auto", "Clickable links in terminal output: auto, always, never")
 	pf.StringArrayVar(&g.excludes, "exclude", nil, "Glob of branch names to leave alone; repeatable (for example --exclude 'release/*')")
 	pf.BoolVar(&g.includeProtected, "include-protected", false, "Also report branches that branch protection rules forbid deleting")
@@ -379,7 +413,7 @@ func execute(cmd *cobra.Command, g *globals, f *checkFlags, ids []string) error 
 		return err
 	}
 
-	format, err := resolveFormat(g)
+	outs, err := resolveOutputs(g)
 	if err != nil {
 		return err
 	}
@@ -387,7 +421,7 @@ func execute(cmd *cobra.Command, g *globals, f *checkFlags, ids []string) error 
 	if err != nil {
 		return err
 	}
-	opts.Details = wantsDetails(format)
+	opts.Details = wantsDetails(outs)
 
 	gitMode, err := gitrepo.ParseMode(g.git)
 	if err != nil {
@@ -443,33 +477,35 @@ func execute(cmd *cobra.Command, g *globals, f *checkFlags, ids []string) error 
 		res.Note(fmt.Sprintf("--no-fetch was given, so branches and merge status are as of the last fetch of %s.", src.LocalRepo()))
 	}
 
-	out, closeOut, err := openOutput(g.output, cmd.OutOrStdout())
-	if err != nil {
-		return err
-	}
-	defer closeOut()
-
-	// Writing to a file means the report is not going to a terminal, however
-	// this process was started.
-	toTerminal := g.output == ""
 	t := term.FromEnv()
 	width, _, _ := t.Size()
-	if err := report.Render(res, report.Options{
-		Out:        out,
-		ErrOut:     cmd.ErrOrStderr(),
-		Format:     format,
-		IsTTY:      toTerminal && t.IsTerminalOutput(),
-		Color:      toTerminal && t.IsColorEnabled(),
-		Width:      width,
-		Hyperlinks: hyperlinks,
-	}); err != nil {
-		return err
+	// The terminal report ends with the summary itself, so printing the
+	// summary again after one would only repeat it.
+	summarised := false
+	for _, o := range outs {
+		// Writing to a file means that report is not going to a terminal,
+		// however this process was started.
+		isTTY := o.stdout() && t.IsTerminalOutput()
+		if err := writeReport(res, o, report.Options{
+			ErrOut:     cmd.ErrOrStderr(),
+			Format:     o.format,
+			IsTTY:      isTTY,
+			Color:      o.stdout() && t.IsColorEnabled(),
+			Width:      width,
+			Hyperlinks: hyperlinks,
+		}, cmd.OutOrStdout()); err != nil {
+			return err
+		}
+		if !o.stdout() {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Wrote %s report for %s to %s\n", o.format, res.Repository, o.path)
+		}
+		summarised = summarised || (o.format == report.FormatTable && isTTY)
 	}
-	if err := closeOut(); err != nil {
-		return err
-	}
-	if g.output != "" {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Wrote %s report for %s to %s\n", format, res.Repository, g.output)
+	if !summarised {
+		sumOut, color := summaryDest(cmd, outs, t)
+		if err := report.WriteSummary(sumOut, res, color); err != nil {
+			return err
+		}
 	}
 
 	if g.exitCode && len(res.Findings) > 0 {
@@ -524,11 +560,69 @@ func openSource(ctx context.Context, repo repository.Repository, client *gh.Clie
 	}, nil
 }
 
-// openOutput returns the writer the report goes to. A second call to the
+// resolveOutputs turns the --output-<format> flags into the list of reports to
+// write. With none of them given, the terminal report goes to standard output,
+// which is what running the tool by hand should do.
+func resolveOutputs(g *globals) ([]output, error) {
+	var outs []output
+	for _, o := range outputFormats {
+		path := strings.TrimSpace(*g.outputs[o.format])
+		if path == "" {
+			continue
+		}
+		outs = append(outs, output{format: o.format, flag: o.flag, path: path})
+	}
+	if len(outs) == 0 {
+		return []output{{format: report.FormatTable, flag: "output-table", path: "-"}}, nil
+	}
+	// Two reports sharing a destination would interleave into nonsense, or
+	// leave a file holding only whichever was written last.
+	seen := map[string]output{}
+	for _, o := range outs {
+		if first, ok := seen[o.path]; ok {
+			where := o.path
+			if o.stdout() {
+				where = "standard output"
+			}
+			return nil, fmt.Errorf("--%s and --%s cannot both write to %s", first.flag, o.flag, where)
+		}
+		seen[o.path] = o
+	}
+	return outs, nil
+}
+
+// writeReport renders one report and closes its destination, so that writing
+// several does not have to leave every file open until the command returns.
+func writeReport(res *checks.Result, o output, opts report.Options, stdout io.Writer) error {
+	out, closeOut, err := openOutput(o.path, stdout)
+	if err != nil {
+		return err
+	}
+	defer closeOut()
+	opts.Out = out
+	if err := report.Render(res, opts); err != nil {
+		return err
+	}
+	return closeOut()
+}
+
+// summaryDest picks where the summary goes. Standard output is the point of
+// it, unless a report is already going there, in which case appending the
+// summary could corrupt a document or confuse whatever is reading the stream.
+func summaryDest(cmd *cobra.Command, outs []output, t term.Term) (io.Writer, bool) {
+	for _, o := range outs {
+		if o.stdout() {
+			return cmd.ErrOrStderr(), false
+		}
+	}
+	return cmd.OutOrStdout(), t.IsTerminalOutput() && t.IsColorEnabled()
+}
+
+// openOutput returns the writer a report goes to. A second call to the
 // returned function is harmless, so it works as both a defer and an explicit
 // close whose error is checked.
 func openOutput(path string, fallback io.Writer) (io.Writer, func() error, error) {
-	if path == "" {
+	if path == "" || path == "-" {
 		return fallback, func() error { return nil }, nil
 	}
 	f, err := os.Create(path)
@@ -576,26 +670,16 @@ func buildOptions(g *globals, f *checkFlags) (checks.Options, error) {
 	return opts, nil
 }
 
-// wantsDetails reports whether a format shows the per-item detail, and so
-// justifies the extra pull request lookup that gathering it costs.
-func wantsDetails(format report.Format) bool {
-	return format == report.FormatHTML || format == report.FormatMarkdown
-}
-
-// resolveFormat works out the report format, treating --json as shorthand and
-// refusing the combination that would silently ignore one of them.
-func resolveFormat(g *globals) (report.Format, error) {
-	format, err := report.ParseFormat(g.format)
-	if err != nil {
-		return "", err
-	}
-	if g.jsonOut {
-		if format != report.FormatTable && format != report.FormatJSON {
-			return "", fmt.Errorf("--json conflicts with --format %s; pass only one", format)
+// wantsDetails reports whether any report being written shows the per-item
+// detail, and so justifies the extra pull request lookup that gathering it
+// costs.
+func wantsDetails(outs []output) bool {
+	for _, o := range outs {
+		if o.format == report.FormatHTML || o.format == report.FormatMarkdown {
+			return true
 		}
-		return report.FormatJSON, nil
 	}
-	return format, nil
+	return false
 }
 
 func resolveRepo(spec string) (repository.Repository, error) {
