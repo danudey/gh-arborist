@@ -29,14 +29,18 @@ jobs:
         id: arborist
         with:
           version: source
-          format: html
+          # Two reports from one scan: the Markdown one lands in the job
+          # summary, and both go into the artifact it links to.
+          formats: markdown html
           args: --skip orphans # GITHUB_TOKEN cannot read the collaborator list
-      - run: echo "findings=${{ steps.arborist.outputs.findings }} report=${{ steps.arborist.outputs.report-path }}"
-      - name: HTML Preview
-        id: html_preview
-        uses: pavi2410/html-preview-action@v5
-        with:
-          html_file: ${{ steps.arborist.outputs.report-path }}
-          upload: auto
-          job_summary: true
+      - name: Show what was written
+        env:
+          FINDINGS: ${{ steps.arborist.outputs.findings }}
+          FORMATS: ${{ steps.arborist.outputs.report-formats }}
+          # Newline-separated, so it goes through the environment rather than
+          # into the command line.
+          REPORTS: ${{ steps.arborist.outputs.report-paths }}
+        run: |
+          echo "findings=$FINDINGS formats=$FORMATS"
+          printf '%s\n' "$REPORTS"
 

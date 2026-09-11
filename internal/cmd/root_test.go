@@ -116,6 +116,19 @@ func TestCommandTree(t *testing.T) {
 		}
 	}
 
+	// So is where each report goes, and the old single-report flags must not
+	// linger and quietly do nothing.
+	for _, o := range outputFormats {
+		if root.PersistentFlags().Lookup(o.flag) == nil {
+			t.Errorf("--%s is not a global flag", o.flag)
+		}
+	}
+	for _, flag := range []string{"format", "json", "output"} {
+		if root.PersistentFlags().Lookup(flag) != nil {
+			t.Errorf("--%s was replaced by the --output-<format> flags", flag)
+		}
+	}
+
 	// The cache is not a check, but it has to be reachable.
 	for _, sub := range []string{"path", "clear"} {
 		cmd, _, err := root.Find([]string{"cache", sub})
@@ -141,36 +154,70 @@ func TestNoMutatingFlags(t *testing.T) {
 	}
 }
 
-func TestResolveFormat(t *testing.T) {
-	tests := []struct {
-		name    string
-		globals globals
-		want    report.Format
-		wantErr bool
-	}{
-		{"default", globals{format: "table"}, report.FormatTable, false},
-		{"markdown", globals{format: "md"}, report.FormatMarkdown, false},
-		{"html", globals{format: "html"}, report.FormatHTML, false},
-		{"json flag", globals{format: "table", jsonOut: true}, report.FormatJSON, false},
-		{"json flag with json format", globals{format: "json", jsonOut: true}, report.FormatJSON, false},
-		// Silently ignoring one of two conflicting requests would be worse
-		// than refusing.
-		{"json flag with html format", globals{format: "html", jsonOut: true}, "", true},
-		{"unknown format", globals{format: "pdf"}, "", true},
+// testGlobals builds the globals the output flags would have produced, so the
+// resolution can be tested without going through cobra.
+func testGlobals(paths map[report.Format]string) *globals {
+	g := &globals{outputs: map[report.Format]*string{}}
+	for _, o := range outputFormats {
+		path := paths[o.format]
+		g.outputs[o.format] = &path
 	}
-	for _, tt := range tests {
-		got, err := resolveFormat(&tt.globals)
-		if tt.wantErr {
-			if err == nil {
-				t.Errorf("%s: expected an error, got %q", tt.name, got)
-			}
-			continue
+	return g
+}
+
+func TestResolveOutputs(t *testing.T) {
+	// Running the tool by hand and asking for nothing gets the terminal
+	// report on standard output.
+	outs, err := resolveOutputs(testGlobals(nil))
+	if err != nil {
+		t.Fatalf("resolveOutputs: %v", err)
+	}
+	if len(outs) != 1 || outs[0].format != report.FormatTable || !outs[0].stdout() {
+		t.Errorf("the default should be the table report on standard output, got %+v", outs)
+	}
+
+	// Several formats at once, each to its own destination, written in a
+	// predictable order.
+	outs, err = resolveOutputs(testGlobals(map[report.Format]string{
+		report.FormatJSON:     "-",
+		report.FormatHTML:     "out.html",
+		report.FormatMarkdown: "out.md",
+	}))
+	if err != nil {
+		t.Fatalf("resolveOutputs: %v", err)
+	}
+	want := []output{
+		{format: report.FormatMarkdown, flag: "output-md", path: "out.md"},
+		{format: report.FormatHTML, flag: "output-html", path: "out.html"},
+		{format: report.FormatJSON, flag: "output-json", path: "-"},
+	}
+	if len(outs) != len(want) {
+		t.Fatalf("got %d outputs, want %d: %+v", len(outs), len(want), outs)
+	}
+	for i, w := range want {
+		if outs[i] != w {
+			t.Errorf("output %d is %+v, want %+v", i, outs[i], w)
 		}
-		if err != nil {
-			t.Errorf("%s: %v", tt.name, err)
-		} else if got != tt.want {
-			t.Errorf("%s: got %q, want %q", tt.name, got, tt.want)
-		}
+	}
+}
+
+// Two reports sharing a destination would interleave, or leave a file holding
+// only one of them, so refuse rather than write something misleading.
+func TestResolveOutputsRejectsSharedDestinations(t *testing.T) {
+	if _, err := resolveOutputs(testGlobals(map[report.Format]string{
+		report.FormatHTML: "-",
+		report.FormatJSON: "-",
+	})); err == nil {
+		t.Error("two formats on standard output should fail")
+	} else if !strings.Contains(err.Error(), "standard output") {
+		t.Errorf("the error should say where the clash is, got %q", err)
+	}
+
+	if _, err := resolveOutputs(testGlobals(map[report.Format]string{
+		report.FormatHTML:     "report.out",
+		report.FormatMarkdown: "report.out",
+	})); err == nil {
+		t.Error("two formats writing to one file should fail")
 	}
 }
 
@@ -183,8 +230,12 @@ func TestDetailsOnlyForRichFormats(t *testing.T) {
 		report.FormatTable:    false,
 		report.FormatJSON:     false,
 	} {
-		if got := wantsDetails(format); got != want {
+		if got := wantsDetails([]output{{format: format, path: "-"}}); got != want {
 			t.Errorf("format %q: wantsDetails() = %v, want %v", format, got, want)
 		}
+	}
+	// One rich format among several is enough to pay for the detail.
+	if !wantsDetails([]output{{format: report.FormatTable}, {format: report.FormatHTML}}) {
+		t.Error("wantsDetails() should be true when any output wants the detail")
 	}
 }

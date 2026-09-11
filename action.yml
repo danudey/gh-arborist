@@ -13,11 +13,27 @@ inputs:
   repository:
     description: 'Repository to scan, as [HOST/]OWNER/REPO. Set to an empty string to scan the checkout in the working directory.'
     default: ${{ github.repository }}
-  format:
-    description: 'Report format: table, markdown, html or json.'
-    default: markdown
-  output:
-    description: 'File to write the report to. Defaults to arborist-report.<ext> under the runner temp directory. Parent directories are created.'
+  formats:
+    description: >-
+      Report formats to write, separated by spaces, commas or newlines: table,
+      markdown, html, json. Each is written to arborist-report.<ext> in
+      output-dir unless output-<format> gives it a path of its own. Defaults to
+      markdown, which is what the job summary renders.
+    default: ''
+  output-dir:
+    description: 'Directory for the reports that "formats" names. Defaults to the runner temp directory, which keeps them out of the checkout.'
+    default: ''
+  output-table:
+    description: 'File to write the terminal report to. Setting it also asks for that format. Parent directories are created.'
+    default: ''
+  output-md:
+    description: 'File to write the Markdown report to. Setting it also asks for that format. Parent directories are created.'
+    default: ''
+  output-html:
+    description: 'File to write the HTML report to. Setting it also asks for that format. Parent directories are created.'
+    default: ''
+  output-json:
+    description: 'File to write the JSON report to. Setting it also asks for that format. Parent directories are created.'
     default: ''
   args:
     description: >-
@@ -39,7 +55,11 @@ inputs:
     description: 'Fail the job when the report is not empty. Publishing still happens first.'
     default: 'false'
   job-summary:
-    description: 'Append the report to the job summary: true, false, or "auto" for markdown reports only.'
+    description: >-
+      Append a report to the job summary: true, false, or "auto" for a Markdown
+      report only. The Markdown report is used when one was written, otherwise
+      the table report, otherwise the first one. Anything but false also links
+      the artifact holding every report, so an HTML report is one click away.
     default: auto
   upload-artifact:
     description: 'Upload the report as a workflow artifact.'
@@ -60,7 +80,7 @@ inputs:
     description: 'Token with the "gist" scope. The built-in GITHUB_TOKEN cannot write gists, so this must be a personal access token.'
     default: ''
   gist-file-name:
-    description: 'Name of the file inside the gist. Defaults to the report file name.'
+    description: 'Name of the file inside the gist. Defaults to each report file name, and can only be set when a single report is written.'
     default: ''
   gist-description:
     description: 'Description of the gist.'
@@ -71,11 +91,29 @@ inputs:
 
 outputs:
   report-path:
-    description: 'Path of the report that was written.'
-    value: ${{ steps.run.outputs.report-path }}
+    description: 'Path of the first report written, in the order table, markdown, html, json. The one to use when only one report was asked for.'
+    value: ${{ steps.setup.outputs.primary-path }}
   report-format:
-    description: 'Format the report was written in.'
-    value: ${{ steps.setup.outputs.format }}
+    description: 'Format of the report that report-path points at.'
+    value: ${{ steps.setup.outputs.primary-format }}
+  report-paths:
+    description: 'Paths of every report written, one per line.'
+    value: ${{ steps.setup.outputs.report-paths }}
+  report-formats:
+    description: 'Formats that were written, separated by spaces.'
+    value: ${{ steps.setup.outputs.formats }}
+  report-table-path:
+    description: 'Path of the terminal report, or empty when it was not written.'
+    value: ${{ steps.setup.outputs.table-path }}
+  report-md-path:
+    description: 'Path of the Markdown report, or empty when it was not written.'
+    value: ${{ steps.setup.outputs.md-path }}
+  report-html-path:
+    description: 'Path of the HTML report, or empty when it was not written.'
+    value: ${{ steps.setup.outputs.html-path }}
+  report-json-path:
+    description: 'Path of the JSON report, or empty when it was not written.'
+    value: ${{ steps.setup.outputs.json-path }}
   findings:
     description: '"true" when the report is not empty, "false" when nothing was reported.'
     value: ${{ steps.run.outputs.findings }}
@@ -95,34 +133,119 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Install gh-arborist
+    - name: Work out the reports and install gh-arborist
       id: setup
       shell: bash
       env:
         INPUT_VERSION: ${{ inputs.version }}
-        INPUT_FORMAT: ${{ inputs.format }}
-        INPUT_OUTPUT: ${{ inputs.output }}
+        INPUT_FORMATS: ${{ inputs.formats }}
+        INPUT_OUTPUT_DIR: ${{ inputs.output-dir }}
+        INPUT_OUTPUT_TABLE: ${{ inputs.output-table }}
+        INPUT_OUTPUT_MD: ${{ inputs.output-md }}
+        INPUT_OUTPUT_HTML: ${{ inputs.output-html }}
+        INPUT_OUTPUT_JSON: ${{ inputs.output-json }}
+        INPUT_JOB_SUMMARY: ${{ inputs.job-summary }}
         ACTION_PATH: ${{ github.action_path }}
         ACTION_REF: ${{ github.action_ref }}
         GH_TOKEN: ${{ inputs.token }}
       run: |
         set -euo pipefail
 
-        case "$INPUT_FORMAT" in
-          table)          ext=txt ;;
-          markdown|md)    ext=md ;;
-          html|htm)       ext=html ;;
-          json)           ext=json ;;
-          *) echo "::error::unknown format '$INPUT_FORMAT'; choose from table, markdown, html, json" >&2; exit 1 ;;
+        case "$INPUT_JOB_SUMMARY" in
+          true|false|auto) ;;
+          *) echo "::error::job-summary must be true, false or auto, not '$INPUT_JOB_SUMMARY'"; exit 1 ;;
         esac
-        echo "format=$INPUT_FORMAT" >> "$GITHUB_OUTPUT"
 
-        output="$INPUT_OUTPUT"
-        if [ -z "$output" ]; then
-          output="$RUNNER_TEMP/arborist-report.$ext"
+        # FMT is set rather than printed, so that an unknown name can stop the
+        # whole step instead of exiting a command substitution.
+        canon() {
+          case "$1" in
+            table|text)  FMT=table ;;
+            markdown|md) FMT=markdown ;;
+            html|htm)    FMT=html ;;
+            json)        FMT=json ;;
+            *) echo "::error::unknown report format '$1'; choose from table, markdown, html, json"; exit 1 ;;
+          esac
+        }
+
+        want() { case " $selected " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+        # Everything "formats" names, plus every format given a path of its
+        # own. Asking for one twice still writes it once.
+        selected=""
+        set -f
+        for name in $(printf '%s' "$INPUT_FORMATS" | tr ',\n\r' '   '); do
+          canon "$name"
+          if ! want "$FMT"; then selected="$selected $FMT"; fi
+        done
+        set +f
+        for pair in "table:$INPUT_OUTPUT_TABLE" "markdown:$INPUT_OUTPUT_MD" "html:$INPUT_OUTPUT_HTML" "json:$INPUT_OUTPUT_JSON"; do
+          fmt="${pair%%:*}"
+          if [ -n "${pair#*:}" ] && ! want "$fmt"; then selected="$selected $fmt"; fi
+        done
+
+        # Nothing asked for at all: a Markdown report, which is the one the job
+        # summary renders.
+        if [ -z "$selected" ]; then selected="markdown"; fi
+
+        dir="$INPUT_OUTPUT_DIR"
+        if [ -z "$dir" ]; then dir="$RUNNER_TEMP"; fi
+
+        # specs carries one "flag<tab>path" line per report for the run step;
+        # the rest is for the publishing steps and the action's outputs.
+        specs=""
+        paths=""
+        formats=""
+        md_path=""
+        table_path=""
+        for fmt in table markdown html json; do
+          want "$fmt" || continue
+          case "$fmt" in
+            table)    key=table; flag=output-table; ext=txt;  file="$INPUT_OUTPUT_TABLE" ;;
+            markdown) key=md;    flag=output-md;    ext=md;   file="$INPUT_OUTPUT_MD" ;;
+            html)     key=html;  flag=output-html;  ext=html; file="$INPUT_OUTPUT_HTML" ;;
+            json)     key=json;  flag=output-json;  ext=json; file="$INPUT_OUTPUT_JSON" ;;
+          esac
+          if [ -z "$file" ]; then file="$dir/arborist-report.$ext"; fi
+          mkdir -p "$(dirname "$file")"
+
+          specs="$specs$flag"$'\t'"$file"$'\n'
+          paths="$paths$file"$'\n'
+          formats="$formats$fmt "
+          [ "$key" = md ] && md_path="$file"
+          [ "$key" = table ] && table_path="$file"
+          echo "$key-path=$file" >> "$GITHUB_OUTPUT"
+        done
+
+        # The first report written is the one a single-report workflow means.
+        primary_format="${formats%% *}"
+        primary_path="$(printf '%s' "$paths" | head -n 1)"
+
+        # Which report the job summary gets: Markdown renders best, the table
+        # report is the next most readable, and failing both, whatever there is.
+        # "auto" appends only a Markdown report, so it stays empty otherwise.
+        summary=""
+        if [ "$INPUT_JOB_SUMMARY" != false ]; then
+          if [ -n "$md_path" ]; then
+            summary="$md_path"
+          elif [ "$INPUT_JOB_SUMMARY" = true ]; then
+            summary="${table_path:-$primary_path}"
+          fi
         fi
-        mkdir -p "$(dirname "$output")"
-        echo "output=$output" >> "$GITHUB_OUTPUT"
+
+        {
+          echo "formats=${formats% }"
+          echo "primary-format=$primary_format"
+          echo "primary-path=$primary_path"
+          echo "count=$(printf '%s' "$paths" | wc -l | tr -d ' ')"
+          echo "summary-path=$summary"
+          echo "specs<<ARBORIST_EOF"
+          printf '%s' "$specs"
+          echo "ARBORIST_EOF"
+          echo "report-paths<<ARBORIST_EOF"
+          printf '%s' "$paths"
+          echo "ARBORIST_EOF"
+        } >> "$GITHUB_OUTPUT"
 
         version="$INPUT_VERSION"
         if [ -z "$version" ]; then
@@ -159,20 +282,26 @@ runs:
         BIN: ${{ steps.setup.outputs.bin }}
         INPUT_COMMAND: ${{ inputs.command }}
         INPUT_REPOSITORY: ${{ inputs.repository }}
-        INPUT_FORMAT: ${{ inputs.format }}
         INPUT_GIT: ${{ inputs.git }}
         INPUT_ARGS: ${{ inputs.args }}
-        OUTPUT: ${{ steps.setup.outputs.output }}
+        SPECS: ${{ steps.setup.outputs.specs }}
         GH_TOKEN: ${{ inputs.token }}
       run: |
         set -euo pipefail
 
         # BIN is either a path to a binary or the words "gh arborist".
         read -r -a cmd <<< "$BIN"
-        cmd+=("$INPUT_COMMAND" --format "$INPUT_FORMAT" --output "$OUTPUT" --git "$INPUT_GIT" --exit-code)
+        cmd+=("$INPUT_COMMAND" --git "$INPUT_GIT" --exit-code)
         if [ -n "$INPUT_REPOSITORY" ]; then
           cmd+=(--repo "$INPUT_REPOSITORY")
         fi
+
+        # One --output-<format> flag per report, as resolved by the setup step:
+        # every report comes out of a single scan.
+        while IFS=$'\t' read -r flag file; do
+          [ -z "$flag" ] && continue
+          cmd+=("--$flag" "$file")
+        done <<< "$SPECS"
 
         # One argument per line when multi-line; otherwise split on whitespace
         # with globbing off, so --base 'release/*' survives.
@@ -211,14 +340,17 @@ runs:
         fi
 
         echo "findings=$findings" >> "$GITHUB_OUTPUT"
-        echo "report-path=$OUTPUT" >> "$GITHUB_OUTPUT"
-        echo "Report written to $OUTPUT (findings: $findings)"
+        echo "Reports written (findings: $findings):"
+        while IFS=$'\t' read -r flag file; do
+          [ -z "$flag" ] && continue
+          echo "  $file"
+        done <<< "$SPECS"
 
-    - name: Add the report to the job summary
-      if: ${{ inputs.job-summary == 'true' || (inputs.job-summary == 'auto' && (inputs.format == 'markdown' || inputs.format == 'md')) }}
+    - name: Add a report to the job summary
+      if: ${{ steps.setup.outputs.summary-path != '' }}
       shell: bash
       env:
-        REPORT: ${{ steps.run.outputs.report-path }}
+        REPORT: ${{ steps.setup.outputs.summary-path }}
       run: |
         set -euo pipefail
         # The job summary is capped at 1 MiB; leave room for the notice.
@@ -231,22 +363,45 @@ runs:
           cat "$REPORT" >> "$GITHUB_STEP_SUMMARY"
         fi
 
-    - name: Upload the report
+    - name: Upload the reports
       id: artifact
       if: ${{ inputs.upload-artifact == 'true' }}
       uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.artifact-name }}
-        path: ${{ steps.run.outputs.report-path }}
+        # One artifact holding every report that was written.
+        path: ${{ steps.setup.outputs.report-paths }}
         retention-days: ${{ inputs.artifact-retention-days }}
         if-no-files-found: error
 
-    - name: Publish the report to a gist
+    # The HTML report is a single self-contained file, so the artifact is all
+    # anybody needs to open it: no preview service, and no second upload.
+    - name: Link the artifact from the job summary
+      if: ${{ inputs.job-summary != 'false' && steps.artifact.outputs.artifact-url != '' }}
+      shell: bash
+      env:
+        ARTIFACT_NAME: ${{ inputs.artifact-name }}
+        ARTIFACT_URL: ${{ steps.artifact.outputs.artifact-url }}
+        REPORTS: ${{ steps.setup.outputs.report-paths }}
+      run: |
+        set -euo pipefail
+
+        names=""
+        while IFS= read -r report; do
+          [ -z "$report" ] && continue
+          names="$names, $(basename "$report")"
+        done <<< "$REPORTS"
+
+        printf '\n[Download **%s**](%s) — %s\n' \
+          "$ARTIFACT_NAME" "$ARTIFACT_URL" "${names#, }" >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Publish the reports to a gist
       id: gist
       if: ${{ inputs.gist == 'true' }}
       shell: bash
       env:
-        REPORT: ${{ steps.run.outputs.report-path }}
+        REPORTS: ${{ steps.setup.outputs.report-paths }}
+        REPORT_COUNT: ${{ steps.setup.outputs.count }}
         GIST_ID: ${{ inputs.gist-id }}
         GIST_FILE_NAME: ${{ inputs.gist-file-name }}
         GIST_DESCRIPTION: ${{ inputs.gist-description }}
@@ -260,19 +415,33 @@ runs:
           exit 1
         fi
 
-        name="${GIST_FILE_NAME:-$(basename "$REPORT")}"
+        if [ -n "$GIST_FILE_NAME" ] && [ "$REPORT_COUNT" -gt 1 ]; then
+          echo "::error::gist-file-name names one file, but $REPORT_COUNT reports were written; leave it out to use each report's own name" >&2
+          exit 1
+        fi
+
         description="${GIST_DESCRIPTION:-gh-arborist report for ${GITHUB_REPOSITORY} — ${GITHUB_RUN_ID}}"
 
+        # Every report becomes a file in the one gist, keyed by its own name
+        # unless gist-file-name renames the single report.
+        files=$(jq -n '{}')
+        while IFS= read -r report; do
+          [ -z "$report" ] && continue
+          name="${GIST_FILE_NAME:-$(basename "$report")}"
+          files=$(printf '%s' "$files" | jq --arg name "$name" --rawfile content "$report" \
+            '.[$name] = {content: $content}')
+        done <<< "$REPORTS"
+
         if [ -n "$GIST_ID" ]; then
-          body=$(jq -n --arg name "$name" --rawfile content "$REPORT" --arg desc "$description" \
-            '{description: $desc, files: {($name): {content: $content}}}')
+          body=$(jq -n --argjson files "$files" --arg desc "$description" \
+            '{description: $desc, files: $files}')
           url=$(printf '%s' "$body" | gh api -X PATCH "gists/$GIST_ID" --input - -q .html_url)
           id="$GIST_ID"
         else
           public=false
           [ "$GIST_PUBLIC" = "true" ] && public=true
-          body=$(jq -n --arg name "$name" --rawfile content "$REPORT" --arg desc "$description" --argjson public "$public" \
-            '{description: $desc, public: $public, files: {($name): {content: $content}}}')
+          body=$(jq -n --argjson files "$files" --arg desc "$description" --argjson public "$public" \
+            '{description: $desc, public: $public, files: $files}')
           created=$(printf '%s' "$body" | gh api -X POST gists --input -)
           url=$(printf '%s' "$created" | jq -r .html_url)
           id=$(printf '%s' "$created" | jq -r .id)

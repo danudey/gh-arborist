@@ -2,6 +2,7 @@ package report
 
 import (
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/cli/go-gh/v2/pkg/tableprinter"
@@ -112,6 +113,23 @@ func categoryList(f checks.Finding) string {
 		out = append(out, string(cat))
 	}
 	return strings.Join(out, ",")
+}
+
+// WriteSummary writes the tally of what was found, followed by the
+// disclaimer. It is how a run says what it saw when the report itself went
+// somewhere else: the terminal report already ends with this block, and the
+// Markdown, HTML and JSON reports carry it inside the document.
+func WriteSummary(w io.Writer, res *checks.Result, color bool) error {
+	c := palette{enabled: color}
+	if len(res.Findings) == 0 {
+		_, err := fmt.Fprintf(w, "%s Nothing to prune.\n", c.green("✓"))
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "%s\n", summary(res, c)); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(w, "%s\n", c.gray(disclaimer))
+	return err
 }
 
 func summary(res *result, c palette) string {
