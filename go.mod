@@ -3,7 +3,7 @@ module github.com/danudey/gh-arborist
 go 1.26.7
 
 require (
-	github.com/cli/go-gh/v2 v2.16.0
+	github.com/cli/go-gh/v2 v2.16.1
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.9
 )
