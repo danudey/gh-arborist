@@ -176,9 +176,9 @@ func (c *Cache) Save() error {
 	if err != nil {
 		return fmt.Errorf("could not write the cache: %w", err)
 	}
-	defer os.Remove(tmp.Name())
+	defer func() { _ = os.Remove(tmp.Name()) }()
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("could not write the cache: %w", err)
 	}
 	if err := tmp.Close(); err != nil {

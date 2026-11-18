@@ -203,14 +203,20 @@ func openCache(ctx context.Context, repo repository.Repository, progress func(st
 		return nil, fmt.Errorf("could not create the clone directory: %w", err)
 	}
 	// A failed clone leaves a directory git will refuse to reuse.
-	os.RemoveAll(path)
+	if err := os.RemoveAll(path); err != nil {
+		return nil, fmt.Errorf("unable to remove target directory %s: %w", path, err)
+	}
 
 	progress("cloning %s/%s into %s (commits only, no file contents)", repo.Owner, repo.Name, path)
 	r := &Repo{dir: filepath.Dir(path), refPrefix: "refs/heads/", remote: "origin", owned: true, progress: progress, cloned: true}
 	if _, err := r.gitAuthed(ctx, "clone", "--bare", "--filter=blob:none", "--no-tags",
 		remoteURL(repo), path); err != nil {
-		os.RemoveAll(path)
-		return nil, fmt.Errorf("cloning %s/%s: %w", repo.Owner, repo.Name, err)
+		var removeErr error
+		if err := os.RemoveAll(path); err != nil {
+			removeErr = fmt.Errorf("unable to remove temporary directory %s: %w", path, err)
+		}
+		cloneErr := fmt.Errorf("cloning %s/%s: %w", repo.Owner, repo.Name, err)
+		return nil, errors.Join(cloneErr, removeErr)
 	}
 	r.dir = path
 	return r, nil
