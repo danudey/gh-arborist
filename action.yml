@@ -366,7 +366,7 @@ runs:
     - name: Upload the reports
       id: artifact
       if: ${{ inputs.upload-artifact == 'true' }}
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: ${{ inputs.artifact-name }}
         # One artifact holding every report that was written.
